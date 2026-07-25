@@ -209,7 +209,9 @@ function onSummaryLine(line) {
   addLog("sum", "· " + line);   // the radio's own display line, secondary info
 }
 
-// ---- framed-reply waiter (for hello & friends) ----
+// ---- framed-reply waiter + serialized command exchange ----
+// One command may be in flight at a time: rigctl requests, hello and the
+// beacon button all funnel through exchange() so replies can't interleave.
 function waitFrame(ms) {
   return new Promise(resolve => {
     const t0 = Date.now();
@@ -217,16 +219,22 @@ function waitFrame(ms) {
       const f = K5P.extractFrame(rxBuf);
       if (f) { rxBuf = f.rest; clearInterval(iv); resolve(f.payload); return; }
       if (Date.now() - t0 > ms) { clearInterval(iv); resolve(null); }
-    }, 50);
+    }, 10);
   });
 }
-async function sendCmd(frame) {
-  await inv("serial_write", { data: Array.from(frame) });
+let cmdChain = Promise.resolve();
+function exchange(frame, ms) {
+  const p = cmdChain.then(async () => {
+    rxBuf = new Uint8Array(0);
+    await inv("serial_write", { data: Array.from(frame) });
+    return waitFrame(ms || 2000);
+  });
+  cmdChain = p.catch(() => {});
+  return p;
 }
+let fwVersion = "";
 async function hello() {
-  rxBuf = new Uint8Array(0);
-  await sendCmd(K5P.helloFrame());
-  const p = await waitFrame(1500);
+  const p = await exchange(K5P.helloFrame(), 1500);
   if (!p || (p[0] | (p[1] << 8)) !== 0x0515) return null;
   let s = "";
   for (let i = 4; i < p.length && p[i]; i++) s += String.fromCharCode(p[i]);
@@ -269,6 +277,7 @@ async function connect() {
     return;
   }
   connected = true;
+  fwVersion = ver;
   setStatus("connected: " + ver + " — monitoring", "ok");
   $("btnConnect").textContent = "Disconnect";
   $("btnBeacon").disabled = false;
@@ -297,8 +306,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("btnBeacon").addEventListener("click", async () => {
     if (!connected) return;
     try {
-      await sendCmd(K5P.beaconFrame());
-      const p = await waitFrame(3000);
+      const p = await exchange(K5P.beaconFrame(), 3000);
       addLog(p && (p[0] | (p[1] << 8)) === 0x0703 ? "sum" : "err",
              p ? "· beacon transmitted" : "beacon: no ack from radio");
     } catch (e) { addLog("err", "beacon failed: " + e); }

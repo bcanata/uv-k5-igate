@@ -7,8 +7,9 @@
 // as events. A generation counter invalidates the thread on close/reopen so a
 // stale thread can never emit into a new session.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -20,6 +21,15 @@ struct AppState {
     serial_gen: AtomicU64,
     tcp: Mutex<Option<TcpStream>>,
     tcp_gen: AtomicU64,
+    rigctl: Mutex<HashMap<u64, TcpStream>>,
+    rigctl_gen: AtomicU64,
+    rigctl_next: AtomicU64,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct RigctlCmd {
+    id: u64,
+    line: String,
 }
 
 #[tauri::command]
@@ -170,6 +180,93 @@ fn tcp_disconnect(state: State<'_, AppState>) {
     }
 }
 
+// rigctld-compatible server: localhost-only listener, one reader thread per
+// client. Lines go to the webview as "rigctl-cmd" events; the JS protocol
+// handler answers via rigctl_reply. Client count changes emit "rigctl-count".
+fn rigctl_emit_count(app: &AppHandle) {
+    let n = app.state::<AppState>().rigctl.lock().unwrap().len();
+    let _ = app.emit("rigctl-count", n);
+}
+
+#[tauri::command]
+fn rigctl_start(app: AppHandle, state: State<'_, AppState>, port: u16) -> Result<(), String> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let gen = state.rigctl_gen.fetch_add(1, Ordering::SeqCst) + 1;
+
+    std::thread::spawn(move || {
+        loop {
+            let st = app.state::<AppState>();
+            if st.rigctl_gen.load(Ordering::SeqCst) != gen {
+                break; // stopped or restarted; dropping the listener closes the port
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nodelay(true).ok();
+                    stream.set_nonblocking(false).ok();
+                    let Ok(rd) = stream.try_clone() else { continue };
+                    let id = st.rigctl_next.fetch_add(1, Ordering::SeqCst) + 1;
+                    st.rigctl.lock().unwrap().insert(id, stream);
+                    rigctl_emit_count(&app);
+
+                    let capp = app.clone();
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(rd);
+                        let mut line: Vec<u8> = Vec::with_capacity(128);
+                        loop {
+                            let st = capp.state::<AppState>();
+                            if st.rigctl_gen.load(Ordering::SeqCst) != gen {
+                                break;
+                            }
+                            line.clear();
+                            match reader.read_until(b'\n', &mut line) {
+                                Ok(0) | Err(_) => {
+                                    st.rigctl.lock().unwrap().remove(&id);
+                                    rigctl_emit_count(&capp);
+                                    break;
+                                }
+                                Ok(_) => {
+                                    let text: String = line.iter().map(|&b| b as char).collect();
+                                    let text = text.trim().to_string();
+                                    if !text.is_empty() {
+                                        let _ = capp.emit("rigctl-cmd", RigctlCmd { id, line: text });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn rigctl_stop(state: State<'_, AppState>) {
+    state.rigctl_gen.fetch_add(1, Ordering::SeqCst);
+    let mut clients = state.rigctl.lock().unwrap();
+    for (_, s) in clients.drain() {
+        let _ = s.shutdown(Shutdown::Both);
+    }
+}
+
+#[tauri::command]
+fn rigctl_reply(state: State<'_, AppState>, id: u64, text: String) -> Result<(), String> {
+    let mut clients = state.rigctl.lock().unwrap();
+    match clients.get_mut(&id) {
+        Some(s) => {
+            let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
+            s.write_all(&bytes).map_err(|e| e.to_string())
+        }
+        None => Err("client gone".into()),
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -180,7 +277,10 @@ pub fn run() {
             serial_write,
             tcp_connect,
             tcp_send,
-            tcp_disconnect
+            tcp_disconnect,
+            rigctl_start,
+            rigctl_stop,
+            rigctl_reply
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

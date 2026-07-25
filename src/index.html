@@ -22,6 +22,7 @@
   <div id="status" class="status">disconnected</div>
 
   <main>
+    <div class="col">
     <section class="card igate">
       <h2>iGate <span class="badge">RX-only</span></h2>
       <label>Callsign-SSID
@@ -48,6 +49,18 @@
       </div>
     </section>
 
+    <section class="card rig">
+      <h2>Rig control <span class="badge">HAMLIB</span></h2>
+      <label>rigctld port
+        <input id="rigPort" value="4532" inputmode="numeric" />
+      </label>
+      <label class="check"><input type="checkbox" id="rigPtt" /> Allow PTT / TX commands</label>
+      <button id="rigToggle" class="big">Start server</button>
+      <div id="rigStatus" class="isline">rigctl: off</div>
+      <div class="hint2">apps connect as rig model 2:<br /><code>rigctl -m 2 -r 127.0.0.1:4532</code></div>
+    </section>
+    </div>
+
     <section class="card monitor">
       <h2>Monitor
         <span class="spacer"></span>
@@ -64,5 +77,6 @@
 
   <script src="k5proto.js"></script>
   <script src="main.js"></script>
+  <script src="rigctl.js"></script>
 </body>
 </html>
