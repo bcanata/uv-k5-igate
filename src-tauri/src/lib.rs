@@ -41,7 +41,28 @@ struct RigctlCmd {
 // override anything, but it can no longer be the only mechanism: an .app
 // started from Finder, Spotlight or Login Items never sees a shell profile.
 // ---------------------------------------------------------------------------
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+// Container-level serde(default) fills missing fields from Self::default(), so
+// this is also what a config.json written by an older build inherits. Beaconing
+// defaults to on: an iGate that never announces itself is invisible on the map,
+// and that surprised us once already.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            call: String::new(),
+            server: "euro.aprs2.net:14580".into(),
+            port: String::new(),
+            autostart: false,
+            comment: "UV-K5 iGate".into(),
+            beacon_mins: 30,
+            lat: 0,
+            lon: 0,
+            launch_at_login: false,
+            start_hidden: false,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Config {
     call: String,

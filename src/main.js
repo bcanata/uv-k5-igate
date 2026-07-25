@@ -25,10 +25,19 @@ function loadSettings() {
   try { return JSON.parse(localStorage.getItem(SET_KEY)) || {}; } catch (e) { return {}; }
 }
 function saveSettings() {
-  localStorage.setItem(SET_KEY, JSON.stringify({
+  const cfg = {
     call: $("igCall").value.trim().toUpperCase(),
-    server: $("igServer").value
-  }));
+    server: $("igServer").value,
+    // only remember a port we actually talked to a radio on, or autostart would
+    // faithfully reconnect to whatever happened to be first in the list
+    port: connected ? ($("port").value || "") : (loadSettings().port || ""),
+    comment: $("igComment").value,
+    beacon_mins: parseInt($("igBeaconMins").value, 10) || 0,
+    lat: beaconPos ? beaconPos.lat : 0,
+    lon: beaconPos ? beaconPos.lon : 0
+  };
+  localStorage.setItem(SET_KEY, JSON.stringify(cfg));
+  inv("save_config", { cfg }).catch(() => {});   // survives a WebView profile reset
 }
 
 // ---- status line ----
@@ -55,7 +64,8 @@ function renderLog() {
   const el = $("monLog");
   const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
   el.innerHTML = logArr.map(e =>
-    `<div class="ln ${e.kind}"><span class="tm">${timeStr(e.t)}</span>${escapeHtml(e.text)}</div>`
+    // restored lines (t === 0) already carry their own timestamp in the text
+    `<div class="ln ${e.kind}">${e.t ? `<span class="tm">${timeStr(e.t)}</span>` : ""}${escapeHtml(e.text)}</div>`
   ).join("");
   if (stick) el.scrollTop = el.scrollHeight;
 }
@@ -204,6 +214,26 @@ function scheduleReconnect() {
   gate.dueAt = Date.now() + secs * 1000;   // fired from the Rust tick
 }
 
+// Our own position, injected straight into APRS-IS with a TCPIP* path. An
+// RX-only gate that never does this is invisible: it appears on the map only
+// as a "via" on someone else's packet, and never as a station of its own.
+// Deliberately bypasses gateCheck() — that judges other people's RF traffic.
+let beaconLastAt = 0;
+async function maybeBeacon() {
+  if (!gate.up || !gate.verified || !beaconPos) return;
+  const mins = parseInt($("igBeaconMins").value, 10) || 0;
+  if (!mins) return;                                   // 0 = do not beacon
+  if (beaconLastAt && Date.now() - beaconLastAt < mins * 60000) return;
+  const line = K5P.igateBeacon(igCall(), beaconPos.lat, beaconPos.lon,
+                               $("igComment").value.trim());
+  try {
+    await inv("tcp_send", { line });
+    beaconLastAt = Date.now();
+    gate.lastSent = Date.now();
+    addLog("gate", "▲ " + line);
+  } catch (e) { addLog("err", "beacon to APRS-IS failed: " + e); }
+}
+
 function gatePacket(f) {
   const reason = K5P.gateCheck(f);
   if (reason) { addLog("drop", "✗ " + reason + "  " + f.tnc2); return; }
@@ -285,14 +315,37 @@ let fwVersion = "";
 // A gate whose radio isn't listening looks perfectly healthy and hears nothing,
 // which is exactly how an afternoon gets wasted. Check it at connect time, and
 // fix it if the firmware supports the switch.
-async function readAprsOn() {
+async function readCfg(addr, len) {
   const d = new Uint8Array(8);
-  d[0] = 0x30; d[1] = 0x0E;     // EEPROM 0x0E30: the persisted APRS settings row
-  d[2] = 8;    d[3] = 0;
+  d[0] = addr & 0xFF; d[1] = (addr >> 8) & 0xFF;
+  d[2] = len & 0xFF;  d[3] = (len >> 8) & 0xFF;
   d.set(K5P.TS, 4);
   const p = await exchange(K5P.frameCommand(0x051B, d), 2000);
-  if (!p || (p[0] | (p[1] << 8)) !== 0x051C || p.length < 9) return null;
-  return p[8] === 1;
+  if (!p || (p[0] | (p[1] << 8)) !== 0x051C || p.length < 8 + len) return null;
+  return p.slice(8, 8 + len);
+}
+async function readAprsOn() {
+  const b = await readCfg(0x0E30, 8);   // the persisted APRS settings row
+  return b ? b[0] === 1 : null;
+}
+
+// The gate's own position, taken from whatever the operator already typed into
+// the radio: SETTINGS_SaveAPRS puts latitude at State[10] of the 0x0E30 row and
+// longitude at State[16], which is the first word of the 0x0F20 row.
+let beaconPos = null;
+async function readRadioPosition() {
+  const a = await readCfg(0x0E30, 16);
+  const b = await readCfg(0x0F20, 8);
+  if (!a || !b) return null;
+  const lat = new DataView(a.buffer, a.byteOffset, a.length).getInt32(10, true);
+  const lon = new DataView(b.buffer, b.byteOffset, b.length).getInt32(0, true);
+  if (lat === 0 && lon === 0) return null;      // fresh radio, nothing set
+  return { lat, lon };
+}
+function showPos() {
+  $("igPos").textContent = beaconPos
+    ? K5P.fmtCoord(beaconPos.lat, true) + " " + K5P.fmtCoord(beaconPos.lon, false)
+    : "no position — set Loc on the radio, or the gate will not beacon";
 }
 async function setAprsOn(on) {
   const p = await exchange(K5P.frameCommand(0x0706, new Uint8Array([on ? 1 : 0])), 1500);
@@ -362,6 +415,10 @@ async function connect(isRetry) {
   if (!ver) {
     try { await inv("serial_close"); } catch (e) {}
     setStatus("no answer — radio on and in normal mode?", "err");
+    // serial_close is ours, so no serial-closed event arrives to kick the
+    // retry loop: schedule it here or a radio that is merely switched off at
+    // boot would never be picked up when it comes back.
+    if (radioWant) scheduleRadioReconnect();
     return;
   }
   connected = true;
@@ -371,6 +428,12 @@ async function connect(isRetry) {
   $("btnBeacon").disabled = false;
   if (!await ensureAprsListening())
     setStatus("connected: " + ver + " — but APRS listening is OFF at the radio", "err");
+  if (!beaconPos) {                     // config override wins; else ask the radio
+    try { beaconPos = await readRadioPosition(); } catch (e) {}
+    showPos();
+    if (beaconPos) addLog("sum", "· gate position from the radio: " +
+      K5P.fmtCoord(beaconPos.lat, true) + " " + K5P.fmtCoord(beaconPos.lon, false));
+  }
 }
 async function disconnect() {
   radioWant = false;                 // an operator disconnect must not self-heal
@@ -465,7 +528,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   try {
     const tail = await inv("log_tail", { n: 200 });
     if (tail && tail.length) {
-      logArr = tail.map(t => ({ t: Date.now(), kind: "sum", text: t }));
+      logArr = tail.map(t => ({ t: 0, kind: "sum", text: t }));
       renderLog();
     }
   } catch (e) {}
@@ -489,6 +552,8 @@ window.addEventListener("DOMContentLoaded", async () => {
       gate.dueAt = 0;
       await connectIS();
     }
+    checkIsLiveness();
+    await maybeBeacon();
   });
 
   await refreshPorts();
@@ -503,7 +568,11 @@ async function autoStart() {
   let cfg;
   try { cfg = await inv("startup_config"); } catch (e) { return; }
   if (!cfg) return;
-  if (cfg.call) { $("igCall").value = cfg.call; updatePasscode(); saveSettings(); }
+  if (cfg.call) { $("igCall").value = cfg.call; updatePasscode(); }
+  if (cfg.comment) $("igComment").value = cfg.comment;
+  if (typeof cfg.beacon_mins === "number" && cfg.beacon_mins >= 0) $("igBeaconMins").value = cfg.beacon_mins;
+  if (cfg.lat || cfg.lon) { beaconPos = { lat: cfg.lat, lon: cfg.lon }; }   // override
+  showPos();
   if (cfg.server) {
     if (![...$("igServer").options].some(o => o.value === cfg.server))
       $("igServer").add(new Option(cfg.server, cfg.server));
@@ -519,7 +588,11 @@ async function autoStart() {
 
   addLog("sum", "· auto-start: connecting to the radio…");
   await connect();
-  if (!connected) { addLog("err", "auto-start: radio did not answer — will not gate"); return; }
+  // The two links are independent. If the radio is off right now the retry
+  // loop will bring it back, so still bring up APRS-IS and beacon our
+  // position — otherwise one radio hiccup at boot leaves the gate off the
+  // map indefinitely, even after the radio returns.
+  if (!connected) addLog("err", "auto-start: no radio yet — gating anyway, will keep retrying");
   await startGating();
 }
 

@@ -149,6 +149,30 @@ var K5P = (function () {
     return s + ",qAO," + mycall + ":" + f.info;
   }
 
+  // ---- our own position, as APRS wants it -------------------------------
+  // micro-degrees -> "DDMM.mm" / "DDDMM.mm" with the hemisphere letter, using
+  // the same integer maths as the firmware's APRS_PosDigits so a beacon sent
+  // from here lands on exactly the same spot as one sent by the radio.
+  function fmtCoord(udeg, isLat) {
+    const neg = udeg < 0;
+    const v = Math.abs(udeg);
+    const deg = Math.floor(v / 1000000);
+    const min100 = Math.floor(((v % 1000000) * 6) / 1000);   // hundredths of a minute
+    const dd = String(deg).padStart(isLat ? 2 : 3, "0");
+    const mm = String(Math.floor(min100 / 100)).padStart(2, "0");
+    const hh = String(min100 % 100).padStart(2, "0");
+    return dd + mm + "." + hh + (isLat ? (neg ? "S" : "N") : (neg ? "W" : "E"));
+  }
+
+  // The TNC2 line an iGate injects to put itself on the map. Path is TCPIP*
+  // because this never touches RF, and the symbol is the "I" overlay on "&",
+  // which is what aprs.fi draws as a gateway rather than a plain station.
+  function igateBeacon(call, latUdeg, lonUdeg, comment) {
+    return call + ">" + "APZUVK,TCPIP*:!" +
+           fmtCoord(latUdeg, true) + "I" + fmtCoord(lonUdeg, false) + "&" +
+           (comment || "");
+  }
+
   // ---- APRS-IS passcode (standard algorithm, callsign without SSID) ----
   function passcode(callsign) {
     var cs = (callsign || "").toUpperCase().split("-")[0];
@@ -167,6 +191,7 @@ var K5P = (function () {
     frameRaw: frameRaw, frameCommand: frameCommand, extractFrame: extractFrame,
     helloFrame: helloFrame, msgFrame: msgFrame, beaconFrame: beaconFrame,
     decodeRaw: decodeRaw, passcode: passcode,
-    gateCheck: gateCheck, gateLine: gateLine
+    gateCheck: gateCheck, gateLine: gateLine,
+    fmtCoord: fmtCoord, igateBeacon: igateBeacon
   };
 })();

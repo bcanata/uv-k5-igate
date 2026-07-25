@@ -39,6 +39,13 @@
           <option value="asia.aprs2.net:14580">asia.aprs2.net:14580</option>
         </select>
       </label>
+      <label>Beacon my position every
+        <input id="igBeaconMins" value="30" inputmode="numeric" title="minutes; 0 disables" />
+      </label>
+      <label>Beacon comment
+        <input id="igComment" value="UV-K5 iGate" maxlength="43" />
+      </label>
+      <div id="igPos" class="isline"></div>
       <button id="igToggle" class="big">Start gating</button>
       <div id="isStatus" class="isline">APRS-IS: idle</div>
       <div class="counters">
