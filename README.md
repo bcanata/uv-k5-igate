@@ -17,8 +17,17 @@ session: passcode login, receive-only gating with `,qAO,CALL`, drop rules
 (TCPIP/TCPXX/NOGATE/RFONLY paths, third-party `}` frames, `?` queries), a 30 s
 duplicate window, auto-reconnect with backoff, and 15-min keepalives.
 
-Roadmap: chat/messaging tab, settings polish, CI-built installers. Later, once
-the firmware grows a raw-TX UART command: digipeater mode.
+**Rig control (Hamlib).** The app runs a rigctld-compatible server
+(localhost-only, default port 4532). Any Hamlib-aware program connects as rig
+model 2 (`rigctl -m 2 -r 127.0.0.1:4532`): get/set frequency (set types the
+keypad, verified with a readback + one retry), get/set mode (FM/AM/USB,
+wide/narrow), get/set PTT (behind an explicit "Allow PTT" checkbox), VFO A/B,
+signal strength (STRENGTH/RAWSTR), RF power. Verified against Hamlib 4.7.2 on
+the air, including keypad-injected QSY round trips.
+
+Roadmap: chat/messaging tab, KISS-over-TCP server (radio as a standard TNC for
+Xastir/YAAC/APRSIS32), CI-built installers. Later, once the firmware grows a
+raw-TX UART command: digipeater mode.
 
 ## Requirements
 

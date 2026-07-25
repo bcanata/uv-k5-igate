@@ -112,12 +112,18 @@ const RIG = (() => {
     const khz = Math.round(hz / 1000);
     const mhz = Math.floor(khz / 1000);
     if (mhz < 15 || mhz > 999) return "RPRT -1\n";
-    await press(KEY.EXIT);
-    await press(KEY.EXIT);
     const s = String(mhz).padStart(3, "0") + String(khz % 1000).padStart(3, "0");
-    for (const c of s)
-      if (!await press(c.charCodeAt(0) - 48)) return "RPRT -6\n";
-    return "RPRT 0\n";
+    // a digit can rarely get lost to an input-state race on the radio
+    // (seen once on air: "144800" landed as 18 MHz), so verify and retry once
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await press(KEY.EXIT);
+      await press(KEY.EXIT);
+      for (const c of s)
+        if (!await press(c.charCodeAt(0) - 48)) return "RPRT -6\n";
+      const r = await getState();
+      if (r && Math.round(r.rx / 100) === khz) return "RPRT 0\n";  // rx is 10 Hz units
+    }
+    return "RPRT -6\n";
   }
 
   const vfoName = (r) => (r.txvfo ? "VFOB" : "VFOA");
