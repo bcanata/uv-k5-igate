@@ -233,6 +233,37 @@ function exchange(frame, ms) {
   return p;
 }
 let fwVersion = "";
+
+// A gate whose radio isn't listening looks perfectly healthy and hears nothing,
+// which is exactly how an afternoon gets wasted. Check it at connect time, and
+// fix it if the firmware supports the switch.
+async function readAprsOn() {
+  const d = new Uint8Array(8);
+  d[0] = 0x30; d[1] = 0x0E;     // EEPROM 0x0E30: the persisted APRS settings row
+  d[2] = 8;    d[3] = 0;
+  d.set(K5P.TS, 4);
+  const p = await exchange(K5P.frameCommand(0x051B, d), 2000);
+  if (!p || (p[0] | (p[1] << 8)) !== 0x051C || p.length < 9) return null;
+  return p[8] === 1;
+}
+async function setAprsOn(on) {
+  const p = await exchange(K5P.frameCommand(0x0706, new Uint8Array([on ? 1 : 0])), 1500);
+  return !!p && (p[0] | (p[1] << 8)) === 0x0707;
+}
+async function ensureAprsListening() {
+  let on;
+  try { on = await readAprsOn(); } catch (e) { return true; }
+  if (on === null) { addLog("err", "could not read the radio's APRS setting"); return true; }
+  if (on) { addLog("sum", "· radio APRS listening: on"); return true; }
+  addLog("err", "radio APRS listening is OFF — it would hear nothing; switching it on");
+  let ok = false;
+  try { ok = await setAprsOn(true); } catch (e) {}
+  addLog(ok ? "sum" : "err", ok
+    ? "· APRS listening switched on"
+    : "could not switch it on — older firmware? turn menu APRS on at the radio");
+  return ok;
+}
+
 async function hello() {
   const p = await exchange(K5P.helloFrame(), 1500);
   if (!p || (p[0] | (p[1] << 8)) !== 0x0515) return null;
@@ -270,9 +301,16 @@ async function connect() {
     setStatus("open failed: " + e, "err");
     return;
   }
-  const ver = await hello();
+  // Retry: while the radio is transmitting (an auto-beacon takes a second or
+  // two) its main loop cannot answer UART, so a single attempt can miss a
+  // perfectly healthy radio.
+  let ver = null;
+  for (let attempt = 0; attempt < 3 && !ver; attempt++) {
+    if (attempt) { setStatus("no answer, retrying…"); await new Promise(r => setTimeout(r, 1200)); }
+    ver = await hello();
+  }
   if (!ver) {
-    await inv("serial_close");
+    try { await inv("serial_close"); } catch (e) {}
     setStatus("no answer — radio on and in normal mode?", "err");
     return;
   }
@@ -281,6 +319,8 @@ async function connect() {
   setStatus("connected: " + ver + " — monitoring", "ok");
   $("btnConnect").textContent = "Disconnect";
   $("btnBeacon").disabled = false;
+  if (!await ensureAprsListening())
+    setStatus("connected: " + ver + " — but APRS listening is OFF at the radio", "err");
 }
 async function disconnect() {
   await inv("serial_close");
@@ -341,7 +381,35 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   await refreshPorts();
   renderStats();
+  await autoStart();
 });
+
+// Unattended start (see startup_config in Rust): with UVK5_IGATE_AUTOSTART=1
+// the station connects to the radio and begins gating on its own, so it
+// survives a reboot or a launch-at-login without anyone clicking.
+async function autoStart() {
+  let cfg;
+  try { cfg = await inv("startup_config"); } catch (e) { return; }
+  if (!cfg) return;
+  if (cfg.call) { $("igCall").value = cfg.call; updatePasscode(); saveSettings(); }
+  if (cfg.server) {
+    if (![...$("igServer").options].some(o => o.value === cfg.server))
+      $("igServer").add(new Option(cfg.server, cfg.server));
+    $("igServer").value = cfg.server;
+    saveSettings();
+  }
+  if (cfg.port) {
+    if (![...$("port").options].some(o => o.value === cfg.port))
+      $("port").add(new Option(cfg.port, cfg.port));
+    $("port").value = cfg.port;
+  }
+  if (!cfg.autostart) return;
+
+  addLog("sum", "· auto-start: connecting to the radio…");
+  await connect();
+  if (!connected) { addLog("err", "auto-start: radio did not answer — will not gate"); return; }
+  await startGating();
+}
 
 function updatePasscode() {
   const pc = K5P.passcode($("igCall").value);

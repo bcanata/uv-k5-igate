@@ -32,6 +32,20 @@ struct RigctlCmd {
     line: String,
 }
 
+// Unattended start: a station should come up by itself after a reboot or a
+// launch-at-login, without anyone clicking Connect. Read from the environment
+// so nothing secret is baked into the bundle:
+//   UVK5_IGATE_CALL=TA1JS-10 UVK5_IGATE_AUTOSTART=1 [UVK5_IGATE_SERVER=host:port]
+#[tauri::command]
+fn startup_config() -> serde_json::Value {
+    serde_json::json!({
+        "call": std::env::var("UVK5_IGATE_CALL").unwrap_or_default(),
+        "server": std::env::var("UVK5_IGATE_SERVER").unwrap_or_default(),
+        "port": std::env::var("UVK5_IGATE_PORT").unwrap_or_default(),
+        "autostart": std::env::var("UVK5_IGATE_AUTOSTART").map(|v| v == "1").unwrap_or(false),
+    })
+}
+
 #[tauri::command]
 fn list_ports() -> Vec<String> {
     serialport::available_ports()
@@ -50,6 +64,9 @@ fn serial_open(app: AppHandle, state: State<'_, AppState>, path: String) -> Resu
         .open()
         .map_err(|e| e.to_string())?;
     let mut rd = port.try_clone().map_err(|e| e.to_string())?;
+    // the clone does not necessarily inherit the timeout, and a reader blocked
+    // forever never notices serial_close and keeps the port open for everyone
+    rd.set_timeout(Duration::from_millis(100)).ok();
     *guard = Some(port);
     drop(guard);
 
@@ -271,6 +288,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            startup_config,
             list_ports,
             serial_open,
             serial_close,
