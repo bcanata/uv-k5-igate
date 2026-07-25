@@ -11,12 +11,14 @@ Rust side is only a serial-port and TCP byte pipe.
 
 ## Status
 
-**Step 1 — skeleton (current):** port picker, connect + firmware handshake,
-live monitor decoding `APRSRAW:` frames to TNC2 lines, beacon-now button,
-passcode calculator. The **Start gating** switch is not wired yet.
+**Working iGate.** Port picker, connect + firmware handshake, live monitor
+decoding `APRSRAW:` frames to TNC2 lines, beacon-now button, and the APRS-IS
+session: passcode login, receive-only gating with `,qAO,CALL`, drop rules
+(TCPIP/TCPXX/NOGATE/RFONLY paths, third-party `}` frames, `?` queries), a 30 s
+duplicate window, auto-reconnect with backoff, and 15-min keepalives.
 
-Step 2 adds the APRS-IS session (login, gating rules, dedupe) — at which point
-packets heard by the radio appear on aprs.fi with a `qAO` path.
+Roadmap: chat/messaging tab, settings polish, CI-built installers. Later, once
+the firmware grows a raw-TX UART command: digipeater mode.
 
 ## Requirements
 

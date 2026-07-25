@@ -140,6 +140,13 @@ label input, label select { width: 100%; }
 .log .tnc2 { color: var(--text); }
 .log .sum { color: var(--dim); }
 .log .err { color: var(--err); }
+.log .gate { color: var(--acc); }
+.log .drop { color: var(--dim); font-style: italic; }
+
+.isline { font-size: 12px; color: var(--dim); }
+.isline.ok { color: var(--acc); }
+.isline.err { color: var(--err); }
+button.on { border-color: var(--err); }
 
 footer {
   padding: 8px 16px 12px;

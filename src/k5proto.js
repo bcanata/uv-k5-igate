@@ -124,6 +124,31 @@ var K5P = (function () {
     return { src: addrs[1].call, dst: addrs[0].call, path: addrs.slice(2), info: info, tnc2: s + ":" + info };
   }
 
+  // ---- iGate rules (RX -> APRS-IS), per the IGate spec + Dire Wolf practice ----
+  // Returns a drop reason string, or null if the frame should be gated.
+  function gateCheck(f) {
+    if (!f || !f.info || !f.info.length) return "empty info";
+    if (f.info[0] === "}") return "3rd-party";          // already gated once
+    if (f.info[0] === "?") return "query";              // general queries stay on RF
+    if (!/^[A-Z0-9]{1,6}(-[0-9]{1,2})?$/.test(f.src)) return "bad source call";
+    for (var i = 0; i < f.path.length; i++) {
+      var c = f.path[i].call.toUpperCase();
+      if (c === "TCPIP" || c === "TCPXX" || c === "NOGATE" || c === "RFONLY")
+        return "no-gate path";
+    }
+    return null;
+  }
+  // The TNC2 line injected into APRS-IS: heard path (with '*' on the last
+  // used digi) + ",qAO,MYCALL" — qAO marks a receive-only iGate.
+  function gateLine(f, mycall) {
+    var lastH = -1;
+    for (var i = 0; i < f.path.length; i++) if (f.path[i].h) lastH = i;
+    var s = f.src + ">" + f.dst;
+    for (var j = 0; j < f.path.length; j++)
+      s += "," + f.path[j].call + (j === lastH ? "*" : "");
+    return s + ",qAO," + mycall + ":" + f.info;
+  }
+
   // ---- APRS-IS passcode (standard algorithm, callsign without SSID) ----
   function passcode(callsign) {
     var cs = (callsign || "").toUpperCase().split("-")[0];
@@ -141,6 +166,7 @@ var K5P = (function () {
     crc16: crc16, xorApply: xorApply, concat: concat,
     frameRaw: frameRaw, frameCommand: frameCommand, extractFrame: extractFrame,
     helloFrame: helloFrame, msgFrame: msgFrame, beaconFrame: beaconFrame,
-    decodeRaw: decodeRaw, passcode: passcode
+    decodeRaw: decodeRaw, passcode: passcode,
+    gateCheck: gateCheck, gateLine: gateLine
   };
 })();
