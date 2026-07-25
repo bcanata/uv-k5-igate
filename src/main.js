@@ -139,6 +139,7 @@ function extractTextLines() {
 function onRawLine(hex) {
   stats.heard++;
   stats.last_heard_unix = Math.floor(Date.now() / 1000);
+  if (typeof KISS !== "undefined") KISS.onRadioFrame(hex);   // feed any TNC clients
   const f = K5P.decodeRaw(hex);
   if (f) {
     stats.decoded++;
@@ -584,6 +585,7 @@ async function autoStart() {
       $("port").add(new Option(cfg.port, cfg.port));
     $("port").value = cfg.port;
   }
+  if (typeof KISS !== "undefined") { try { await KISS.applyConfig(cfg); } catch (e) {} }
   if (!cfg.autostart) return;
 
   addLog("sum", "· auto-start: connecting to the radio…");

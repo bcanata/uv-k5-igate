@@ -67,6 +67,18 @@
       <div id="rigStatus" class="isline">rigctl: off</div>
       <div class="hint2">apps connect as rig model 2:<br /><code>rigctl -m 2 -r 127.0.0.1:4532</code></div>
     </section>
+
+    <section class="card kiss">
+      <h2>TNC <span class="badge">KISS</span></h2>
+      <label>KISS port
+        <input id="kissPort" value="8001" inputmode="numeric" />
+      </label>
+      <label class="check"><input type="checkbox" id="kissBind" /> Allow other machines (LAN)</label>
+      <label class="check"><input type="checkbox" id="kissTx" /> Let clients transmit</label>
+      <button id="kissToggle" class="big">Start server</button>
+      <div id="kissStatus" class="isline">KISS: off</div>
+      <div class="hint2">Xastir / YAAC / APRSIS32 / APRSSwift: point them at<br /><code>127.0.0.1:8001</code> as a KISS TNC</div>
+    </section>
     </div>
 
     <section class="card monitor">
@@ -86,5 +98,6 @@
   <script src="k5proto.js"></script>
   <script src="main.js"></script>
   <script src="rigctl.js"></script>
+  <script src="kiss.js"></script>
 </body>
 </html>

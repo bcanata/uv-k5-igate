@@ -22,6 +22,11 @@ struct AppState {
     serial_gen: AtomicU64,
     tcp: Mutex<Option<TcpStream>>,
     tcp_gen: AtomicU64,
+    kiss: Mutex<HashMap<u64, KissClient>>,
+    kiss_gen: AtomicU64,
+    kiss_next: AtomicU64,
+    kiss_dropped: AtomicU64,
+    kiss_running: std::sync::atomic::AtomicBool,
     rigctl: Mutex<HashMap<u64, TcpStream>>,
     rigctl_gen: AtomicU64,
     rigctl_next: AtomicU64,
@@ -58,6 +63,10 @@ impl Default for Config {
             lon: 0,
             launch_at_login: false,
             start_hidden: false,
+            kiss_port: 8001,
+            kiss_lan: false,
+            kiss_tx: false,
+            kiss_autostart: false,
         }
     }
 }
@@ -75,6 +84,10 @@ struct Config {
     lon: i32,
     launch_at_login: bool,
     start_hidden: bool,
+    kiss_port: u16,
+    kiss_lan: bool,
+    kiss_tx: bool,
+    kiss_autostart: bool,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -441,6 +454,207 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// KISS-over-TCP server: the radio presented as a standard TNC, so Xastir, YAAC,
+// APRSIS32 or APRSSwift can use a UV-K5 as their modem.
+//
+// Unlike the rigctl server this pushes unsolicited frames, so a single wedged
+// client (a phone that walked out of Wi-Fi range) must not stall everything
+// else. Each client therefore gets a bounded channel and its own writer
+// thread; a broadcast never blocks, and a client that falls 64 frames behind
+// is dropped rather than allowed to back-pressure the RX path.
+//
+// FEND/FESC framing lives here because the reader has to find frame boundaries
+// anyway to bound its buffer; the command byte and everything above it stay in
+// JS, matching the split used everywhere else.
+// ---------------------------------------------------------------------------
+const FEND: u8 = 0xC0;
+const FESC: u8 = 0xDB;
+const TFEND: u8 = 0xDC;
+const TFESC: u8 = 0xDD;
+
+fn kiss_escape(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 8);
+    out.push(FEND);
+    for &b in body {
+        match b {
+            FEND => out.extend_from_slice(&[FESC, TFEND]),
+            FESC => out.extend_from_slice(&[FESC, TFESC]),
+            _ => out.push(b),
+        }
+    }
+    out.push(FEND);
+    out
+}
+
+fn kiss_unescape(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut esc = false;
+    for &b in raw {
+        match (esc, b) {
+            (true, TFEND) => { out.push(FEND); esc = false; }
+            (true, TFESC) => { out.push(FESC); esc = false; }
+            (true, _)     => { out.push(b);    esc = false; }
+            (false, FESC) => esc = true,
+            (false, _)    => out.push(b),
+        }
+    }
+    out
+}
+
+struct KissClient {
+    tx: std::sync::mpsc::SyncSender<std::sync::Arc<Vec<u8>>>,
+    sock: TcpStream,   // kept only so a stuck writer can be shut down
+}
+
+#[derive(Clone, serde::Serialize)]
+struct KissFrame {
+    id: u64,
+    data: Vec<u8>,
+}
+
+#[tauri::command]
+fn kiss_start(app: AppHandle, state: State<'_, AppState>, bind: Option<String>, port: u16) -> Result<(), String> {
+    if !state.kiss.lock().unwrap().is_empty() || state.kiss_running.load(Ordering::SeqCst) {
+        return Err("KISS server already running".into());
+    }
+    // localhost by default on purpose: the first bind to 0.0.0.0 raises a
+    // firewall prompt, and an unattended gateway has nobody there to click it.
+    let host = bind.unwrap_or_else(|| "127.0.0.1".into());
+    let listener = TcpListener::bind((host.as_str(), port)).map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let gen = state.kiss_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    state.kiss_running.store(true, Ordering::SeqCst);
+
+    std::thread::spawn(move || {
+        loop {
+            let st = app.state::<AppState>();
+            if st.kiss_gen.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nodelay(true).ok();
+                    // an accepted socket inherits O_NONBLOCK from the listener
+                    // on macOS/BSD; without this the reader spins at 100% CPU
+                    stream.set_nonblocking(false).ok();
+                    let Ok(rd) = stream.try_clone() else { continue };
+                    let Ok(mut wr) = stream.try_clone() else { continue };
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<std::sync::Arc<Vec<u8>>>(64);
+                    let id = st.kiss_next.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    {
+                        let mut map = st.kiss.lock().unwrap();
+                        if st.kiss_gen.load(Ordering::SeqCst) != gen {
+                            break;   // stopped while we were accepting
+                        }
+                        map.insert(id, KissClient { tx, sock: stream });
+                    }
+                    let _ = app.emit("kiss-count", st.kiss.lock().unwrap().len());
+
+                    // writer: the sole owner of removal, so the count cannot drift
+                    let wapp = app.clone();
+                    std::thread::spawn(move || {
+                        wr.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                        for frame in rx {
+                            if wr.write_all(&frame).is_err() {
+                                break;
+                            }
+                        }
+                        let st = wapp.state::<AppState>();
+                        if let Some(c) = st.kiss.lock().unwrap().remove(&id) {
+                            let _ = c.sock.shutdown(Shutdown::Both);
+                        }
+                        let _ = wapp.emit("kiss-count", st.kiss.lock().unwrap().len());
+                    });
+
+                    // reader: FEND-delimited, with a cap so a client that never
+                    // sends one cannot grow the buffer without limit
+                    let rapp = app.clone();
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(rd);
+                        let mut buf: Vec<u8> = Vec::with_capacity(512);
+                        loop {
+                            let st = rapp.state::<AppState>();
+                            if st.kiss_gen.load(Ordering::SeqCst) != gen {
+                                break;
+                            }
+                            buf.clear();
+                            match reader.read_until(FEND, &mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {
+                                    if buf.last() == Some(&FEND) {
+                                        buf.pop();
+                                    }
+                                    if buf.len() > 4096 {
+                                        continue;   // resync rather than hoard
+                                    }
+                                    if buf.is_empty() {
+                                        continue;   // back-to-back FENDs are legal padding
+                                    }
+                                    let data = kiss_unescape(&buf);
+                                    let _ = rapp.emit("kiss-frame", KissFrame { id, data });
+                                }
+                            }
+                        }
+                        // let the writer reap: closing the socket ends its loop
+                        let st = rapp.state::<AppState>();
+                        let sock = st.kiss.lock().unwrap().get(&id).and_then(|c| c.sock.try_clone().ok());
+                        if let Some(s) = sock {
+                            let _ = s.shutdown(Shutdown::Both);
+                        }
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(_) => break,
+            }
+        }
+        app.state::<AppState>().kiss_running.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn kiss_stop(state: State<'_, AppState>) {
+    state.kiss_gen.fetch_add(1, Ordering::SeqCst);
+    state.kiss_running.store(false, Ordering::SeqCst);
+    let mut clients = state.kiss.lock().unwrap();
+    for (_, c) in clients.drain() {
+        let _ = c.sock.shutdown(Shutdown::Both);
+    }
+}
+
+// Escapes once, then hands the same Arc to every client without ever blocking.
+#[tauri::command]
+fn kiss_broadcast(state: State<'_, AppState>, data: Vec<u8>) -> usize {
+    let frame = std::sync::Arc::new(kiss_escape(&data));
+    let clients = state.kiss.lock().unwrap();
+    let mut sent = 0usize;
+    for (_, c) in clients.iter() {
+        match c.tx.try_send(frame.clone()) {
+            Ok(()) => sent += 1,
+            Err(_) => {
+                // 64 frames behind, or gone: drop it. APRS has no retransmit,
+                // and a stalled client must never hold up the radio.
+                state.kiss_dropped.fetch_add(1, Ordering::SeqCst);
+                let _ = c.sock.shutdown(Shutdown::Both);
+            }
+        }
+    }
+    sent
+}
+
+#[tauri::command]
+fn kiss_status(state: State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "running": state.kiss_running.load(Ordering::SeqCst),
+        "clients": state.kiss.lock().unwrap().len(),
+        "dropped": state.kiss_dropped.load(Ordering::SeqCst),
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -517,10 +731,41 @@ pub fn run() {
             tcp_connect,
             tcp_send,
             tcp_disconnect,
+            kiss_start,
+            kiss_stop,
+            kiss_broadcast,
+            kiss_status,
             rigctl_start,
             rigctl_stop,
             rigctl_reply
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kiss_escape, kiss_unescape, FEND, FESC, TFEND, TFESC};
+
+    #[test]
+    fn kiss_round_trip_survives_the_bytes_that_need_escaping() {
+        // a payload deliberately full of FEND/FESC, which is exactly what a
+        // binary AX.25 frame hands us and what naive framing corrupts
+        let body: Vec<u8> = vec![0x00, FEND, 0x41, FESC, FEND, FESC, 0xFF, 0x00, TFEND, TFESC];
+        let wire = kiss_escape(&body);
+
+        assert_eq!(wire.first(), Some(&FEND));
+        assert_eq!(wire.last(), Some(&FEND));
+        // no raw FEND may survive inside the frame, or a reader splits it early
+        assert!(!wire[1..wire.len() - 1].contains(&FEND));
+
+        let back = kiss_unescape(&wire[1..wire.len() - 1]);
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn unescape_tolerates_a_truncated_escape() {
+        // a client that dies mid-escape must not panic us
+        assert_eq!(kiss_unescape(&[0x41, FESC]), vec![0x41]);
+    }
 }
