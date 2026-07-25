@@ -1,66 +1,119 @@
 # UV-K5 iGate
 
-Desktop companion for the [TA1JS UV-K5 APRS firmware](https://github.com/bcanata/uv-k5-firmware-ta1js):
-plug the radio into USB and turn it into a receive-only APRS iGate, with a live
-packet monitor and beacon/message control.
+Turn a Quansheng UV-K5 running the
+[TA1JS APRS firmware](https://github.com/bcanata/uv-k5-firmware-ta1js) into a
+receive-only APRS iGate, a Hamlib-controllable rig and a KISS TNC — by plugging
+it into USB. Runs on macOS and Windows.
 
-Built with [Tauri 2](https://tauri.app) — small native app for macOS and Windows
-(Linux builds for free). All radio protocol logic is plain JavaScript shared in
-spirit with the [web tools](https://github.com/bcanata/uv-k5-aprs-beacon); the
-Rust side is only a serial-port and TCP byte pipe.
+Built with [Tauri 2](https://tauri.app): a small native app, no Electron. The
+Rust side is only byte pipes (serial port, TCP client, two TCP servers); all
+protocol logic is plain JavaScript with no bundler and no npm dependencies.
 
-## Status
+## What it does
 
-**Working iGate.** Port picker, connect + firmware handshake, live monitor
-decoding `APRSRAW:` frames to TNC2 lines, beacon-now button, and the APRS-IS
-session: passcode login, receive-only gating with `,qAO,CALL`, drop rules
-(TCPIP/TCPXX/NOGATE/RFONLY paths, third-party `}` frames, `?` queries), a 30 s
-duplicate window, auto-reconnect with backoff, and 15-min keepalives.
+**iGate.** Forwards packets the radio decodes to APRS-IS with a `qAO` path,
+applying the usual gating rules — drops `TCPIP`/`TCPXX`/`NOGATE`/`RFONLY`
+paths, third-party frames and queries, and de-duplicates over 30 seconds. It
+beacons its own position too, so the gate appears on aprs.fi as a station
+rather than only as a via on someone else's packet; the position is read
+straight from the radio's own `Loc` setting.
 
-**Rig control (Hamlib).** The app runs a rigctld-compatible server
-(localhost-only, default port 4532). Any Hamlib-aware program connects as rig
-model 2 (`rigctl -m 2 -r 127.0.0.1:4532`): get/set frequency (set types the
-keypad, verified with a readback + one retry), get/set mode (FM/AM/USB,
-wide/narrow), get/set PTT (behind an explicit "Allow PTT" checkbox), VFO A/B,
-signal strength (STRENGTH/RAWSTR), RF power. Verified against Hamlib 4.7.2 on
-the air, including keypad-injected QSY round trips.
+**Rig control (Hamlib).** A rigctld-compatible server on `127.0.0.1:4532`.
+Any Hamlib app connects as rig model 2:
 
-Roadmap: chat/messaging tab, KISS-over-TCP server (radio as a standard TNC for
-Xastir/YAAC/APRSIS32), CI-built installers. Later, once the firmware grows a
-raw-TX UART command: digipeater mode.
+```
+rigctl -m 2 -r 127.0.0.1:4532
+```
+
+Frequency, mode, PTT, VFO, S-meter and RF power. Setting the frequency types
+the digits on the radio's keypad and verifies the readback, so a QSY takes
+about a second. PTT is behind an explicit checkbox.
+
+**KISS TNC.** A KISS-over-TCP server (default `127.0.0.1:8001`) so Xastir,
+YAAC, APRSIS32 or [APRSSwift](https://github.com/bcanata/APRSSwift) can use the
+radio as their modem. Receive works out of the box; letting clients transmit is
+opt-in.
+
+**Unattended.** Reconnects to the radio when the USB adapter disappears,
+reconnects to APRS-IS with backoff, keeps running with its window closed
+(tray icon), and carries counters, uptime and the packet log across restarts.
 
 ## Requirements
 
-- UV-K5/K6/5R running the TA1JS APRS firmware, menu **APRS = ON**, tuned to
-  your region's APRS frequency (144.800 MHz in Europe).
+- A UV-K5/K6/5R running the TA1JS APRS firmware, menu **APRS = ON**, tuned to
+  your region's APRS frequency (144.800 MHz in most of Europe). The app tells
+  you if listening is off, and switches it on for you.
 - The K5 programming cable.
-- **macOS:** Apple's built-in CH34x serial driver is broken on recent macOS —
-  install the WCH driver once: `brew install --cask wch-ch34x-usb-serial-driver`
-  (approve it in System Settings, replug). The port then shows up as
+- **macOS:** Apple's built-in CH34x driver is broken on recent releases, so
+  install WCH's once: `brew install --cask wch-ch34x-usb-serial-driver`,
+  approve it in System Settings, replug. The port then appears as
   `/dev/cu.wchusbserial*`.
-- **Windows:** the CH340 driver usually installs itself; otherwise get it from
-  the WCH site.
+- **Windows:** the CH340 driver usually installs itself.
+
+## Installing
+
+Grab the `.dmg` (macOS) or `.msi` (Windows) from
+[Releases](https://github.com/bcanata/uv-k5-igate/releases).
+
+Both are **unsigned**, because code-signing certificates cost money this
+project does not have:
+
+- **macOS** will refuse it on first launch. Right-click the app → **Open** →
+  Open. Once only.
+- **Windows** SmartScreen shows "Windows protected your PC" → **More info** →
+  **Run anyway**.
+
+The macOS build is Apple Silicon only.
+
+## Running it as a station
+
+Configuration lives in `config.json` under the app data directory
+(`~/Library/Application Support/dev.canata.uvk5igate/` on macOS). Environment
+variables override it, which is handy from a terminal:
+
+```
+UVK5_IGATE_CALL=TA1JS-10 UVK5_IGATE_AUTOSTART=1 \
+UVK5_IGATE_PORT=/dev/cu.wchusbserial1130 \
+"UV-K5 iGate.app/Contents/MacOS/uv-k5-igate"
+```
+
+Note that an app launched from Finder or a login item never sees a shell
+profile, so for a permanent station put the settings in `config.json` and set
+`autostart` there. Passing `--autostart` also starts it hidden in the tray.
+
+## Known limits
+
+- **Transmitting is not Bell 202.** This radio's modem produces FFSK
+  1200/1800 Hz, not 1200/2200. Software modems (Dire Wolf, APRSDroid, other
+  UV-K5s) decode it; a hardware TNC such as a Kenwood TH-D75 does not. That
+  affects KISS transmit, not receive.
+- **Frames over 78 bytes do not decode**, a limit in the firmware's receive
+  buffer, so long weather and telemetry packets are neither gated nor passed
+  to KISS clients.
+- **Receive-only gating.** Nothing is gated from the internet back to RF.
 
 ## Development
 
 ```bash
-# prerequisites: Rust (rustup.rs) + Node
-npx @tauri-apps/cli@^2 dev     # run with hot frontend reload
-npx @tauri-apps/cli@^2 build   # produce the installer for this OS
+npx @tauri-apps/cli@^2 dev      # run with hot frontend reload
+npx @tauri-apps/cli@^2 build    # installer for the current OS
+cd src-tauri && cargo test      # KISS codec tests
 ```
 
-The frontend (`src/`) is plain HTML/CSS/JS — no bundler, no npm dependencies.
-
-## Architecture
-
 ```
-src/            frontend (all protocol logic)
-  k5proto.js    AB CD..DC BA envelope, K5 commands, AX.25 raw-frame -> TNC2,
-                APRS-IS passcode
-  main.js       serial session, line extraction, UI
-src-tauri/      Rust: serial + TCP byte pipes as Tauri commands/events
+src/            frontend, all protocol logic, no build step
+  k5proto.js    K5 envelope, AX.25 -> TNC2, gating rules, passcode, position
+  main.js       serial session, APRS-IS session, beacon, UI
+  rigctl.js     Hamlib rigctld protocol
+  kiss.js       KISS command layer
+src-tauri/      Rust: serial + TCP pipes, rigctl and KISS listeners, config,
+                persisted stats and log, tray
 ```
 
-Serial events: `serial-data` (bytes), `serial-closed`. TCP events: `tcp-line`,
-`tcp-closed`. Commands: `list_ports`, `serial_open/close/write`,
-`tcp_connect/send/disconnect`.
+If a macOS `.dmg` build fails, a previous run probably left its read-write
+image mounted: `hdiutil detach /Volumes/dmg.*` and delete
+`src-tauri/target/release/bundle/macos/rw.*.dmg`.
+
+## Licence
+
+Apache-2.0.
