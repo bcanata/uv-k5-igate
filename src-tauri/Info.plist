@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- This is an unattended gateway: it must keep servicing the radio and
+	     APRS-IS with its window hidden. App Nap would suspend the process and
+	     throttle everything to a crawl. Tauri merges this into the bundle. -->
+	<key>NSAppSleepDisabled</key>
+	<true/>
+</dict>
+</plist>

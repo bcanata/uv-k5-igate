@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct AppState {
+    quitting: std::sync::atomic::AtomicBool,
     serial: Mutex<Option<Box<dyn serialport::SerialPort>>>,
     serial_gen: AtomicU64,
     tcp: Mutex<Option<TcpStream>>,
@@ -32,18 +33,145 @@ struct RigctlCmd {
     line: String,
 }
 
-// Unattended start: a station should come up by itself after a reboot or a
-// launch-at-login, without anyone clicking Connect. Read from the environment
-// so nothing secret is baked into the bundle:
-//   UVK5_IGATE_CALL=TA1JS-10 UVK5_IGATE_AUTOSTART=1 [UVK5_IGATE_SERVER=host:port]
+// ---------------------------------------------------------------------------
+// Configuration and persisted state.
+//
+// Config is a three-layer merge: built-in defaults < config.json < UVK5_IGATE_*
+// environment. The environment stays on top so a terminal launch can still
+// override anything, but it can no longer be the only mechanism: an .app
+// started from Finder, Spotlight or Login Items never sees a shell profile.
+// ---------------------------------------------------------------------------
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Config {
+    call: String,
+    server: String,
+    port: String,
+    autostart: bool,
+    comment: String,
+    beacon_mins: u32,      // 0 = do not beacon our own position to APRS-IS
+    lat: i32,              // micro-degrees; 0/0 = take the radio's stored position
+    lon: i32,
+    launch_at_login: bool,
+    start_hidden: bool,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Stats {
+    heard: u64,
+    decoded: u64,
+    gated: u64,
+    duped: u64,
+    total_uptime_secs: u64,
+    first_start_unix: u64,
+    last_heard_unix: u64,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn config_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("config.json"))
+}
+fn data_file(app: &AppHandle, name: &str) -> Option<std::path::PathBuf> {
+    app.path().app_local_data_dir().ok().map(|d| d.join(name))
+}
+
+// Write through a temp file and rename, so a crash mid-write cannot leave a
+// truncated config behind. rename() replaces the target on Windows too.
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(bytes).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+fn read_config(app: &AppHandle) -> Config {
+    config_path(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Config>(&b).ok())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
-fn startup_config() -> serde_json::Value {
-    serde_json::json!({
-        "call": std::env::var("UVK5_IGATE_CALL").unwrap_or_default(),
-        "server": std::env::var("UVK5_IGATE_SERVER").unwrap_or_default(),
-        "port": std::env::var("UVK5_IGATE_PORT").unwrap_or_default(),
-        "autostart": std::env::var("UVK5_IGATE_AUTOSTART").map(|v| v == "1").unwrap_or(false),
-    })
+fn startup_config(app: AppHandle) -> Config {
+    let mut c = read_config(&app);
+    // environment wins, so an explicitly-launched station can always be steered
+    if let Ok(v) = std::env::var("UVK5_IGATE_CALL")   { if !v.is_empty() { c.call = v; } }
+    if let Ok(v) = std::env::var("UVK5_IGATE_SERVER") { if !v.is_empty() { c.server = v; } }
+    if let Ok(v) = std::env::var("UVK5_IGATE_PORT")   { if !v.is_empty() { c.port = v; } }
+    if let Ok(v) = std::env::var("UVK5_IGATE_AUTOSTART") { c.autostart = v == "1"; }
+    if std::env::args().any(|a| a == "--autostart") { c.autostart = true; c.start_hidden = true; }
+    c
+}
+
+#[tauri::command]
+fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
+    let path = config_path(&app).ok_or("no config dir")?;
+    atomic_write(&path, serde_json::to_vec_pretty(&cfg).map_err(|e| e.to_string())?.as_slice())
+}
+
+#[tauri::command]
+fn load_stats(app: AppHandle) -> Stats {
+    data_file(&app, "state.json")
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Stats>(&b).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn save_stats(app: AppHandle, mut stats: Stats) -> Result<(), String> {
+    if stats.first_start_unix == 0 {
+        stats.first_start_unix = now_unix();
+    }
+    let path = data_file(&app, "state.json").ok_or("no data dir")?;
+    atomic_write(&path, serde_json::to_vec_pretty(&stats).map_err(|e| e.to_string())?.as_slice())
+}
+
+// Batched from the frontend (one IPC per packet would be wasteful). Rotates at
+// 1 MiB so an unattended gateway cannot fill the disk over months.
+#[tauri::command]
+fn log_append(app: AppHandle, lines: Vec<String>) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let path = data_file(&app, "igate.log").ok_or("no data dir")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    if std::fs::metadata(&path).map(|m| m.len() > 1_048_576).unwrap_or(false) {
+        let _ = std::fs::rename(&path, path.with_extension("1.log"));
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    for l in lines {
+        writeln!(f, "{}", l).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// Repopulate the monitor pane after a restart, so a station that has been up
+// for days does not look freshly booted.
+#[tauri::command]
+fn log_tail(app: AppHandle, n: usize) -> Vec<String> {
+    let Some(path) = data_file(&app, "igate.log") else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(n)..].iter().map(|s| s.to_string()).collect()
 }
 
 #[tauri::command]
@@ -284,11 +412,83 @@ fn rigctl_reply(state: State<'_, AppState>, id: u64, text: String) -> Result<(),
     }
 }
 
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            use tauri::tray::TrayIconBuilder;
+
+            let show_i = MenuItem::with_id(app, "show", "Open iGate", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit iGate", true, Some("CmdOrCtrl+Q"))?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&show_i, &sep, &quit_i])?;
+
+            TrayIconBuilder::with_id("main")
+                .icon(app.default_window_icon().unwrap().clone())
+                .icon_as_template(true)
+                .tooltip("UV-K5 iGate")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => {
+                        app.state::<AppState>()
+                            .quitting
+                            .store(true, Ordering::SeqCst);
+                        let _ = app.emit("app-quitting", ());   // let the UI flush state
+                        std::thread::sleep(Duration::from_millis(400));
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            // A hidden webview throttles its own timers hard (and macOS may nap
+            // the process), so anything time-driven — reconnect backoff, the
+            // beacon, state flushes — is paced from here instead of setInterval.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(5));
+                if handle.emit("tick", ()).is_err() {
+                    break;
+                }
+            });
+
+            // Launched by the login item: come up in the tray, no window flash.
+            if std::env::args().any(|a| a == "--autostart") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing the window must not kill the gateway; only the tray quits.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if app.state::<AppState>().quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             startup_config,
+            save_config,
+            load_stats,
+            save_stats,
+            log_append,
+            log_tail,
             list_ports,
             serial_open,
             serial_close,

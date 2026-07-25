@@ -12,7 +12,12 @@ let connected = false;
 let rxBuf = new Uint8Array(0);   // binary buffer for AB CD frame extraction
 let textBuf = "";                // latin-1 text buffer for APRS:/APRSRAW: lines
 let logArr = [];
-const stats = { heard: 0, decoded: 0, gated: 0, duped: 0 };
+// Mirrors the Rust `Stats` struct; counters are cumulative across restarts so a
+// station can be judged on its whole life, not since the last launch.
+const stats = { heard: 0, decoded: 0, gated: 0, duped: 0,
+                total_uptime_secs: 0, first_start_unix: 0, last_heard_unix: 0 };
+let flushMark = Date.now();      // uptime accounted up to here
+let logPending = [];             // batched for log_append
 
 // ---- persisted settings ----
 const SET_KEY = "igate.settings";
@@ -43,6 +48,7 @@ function timeStr(t) {
 function addLog(kind, text) {
   logArr.push({ t: Date.now(), kind, text });
   if (logArr.length > 500) logArr = logArr.slice(-500);
+  logPending.push(timeStr(Date.now()) + " " + text);
   renderLog();
 }
 function renderLog() {
@@ -61,6 +67,30 @@ function renderStats() {
   $("stDecoded").textContent = stats.decoded;
   $("stGated").textContent = stats.gated;
   $("stDuped").textContent = stats.duped;
+  const up = stats.total_uptime_secs + Math.floor((Date.now() - flushMark) / 1000);
+  const parts = [];
+  if (up >= 86400) parts.push(Math.floor(up / 86400) + "d");
+  if (up >= 3600)  parts.push(Math.floor((up % 86400) / 3600) + "h");
+  parts.push(Math.floor((up % 3600) / 60) + "m");
+  let s = "up " + parts.join(" ");
+  if (stats.last_heard_unix) {
+    const ago = Math.max(0, Math.floor(Date.now() / 1000) - stats.last_heard_unix);
+    s += " · last heard " + (ago < 90 ? ago + "s" : Math.floor(ago / 60) + "m") + " ago";
+  }
+  $("stLife").textContent = s;
+}
+
+// Persist counters and the log on a timer, plus on the way out: a station that
+// is force-quit or loses power should lose one interval, not its whole history.
+async function flushState() {
+  const now = Date.now();
+  stats.total_uptime_secs += Math.floor((now - flushMark) / 1000);
+  flushMark = now;
+  try { await inv("save_stats", { stats }); } catch (e) {}
+  if (logPending.length) {
+    const lines = logPending; logPending = [];
+    try { await inv("log_append", { lines }); } catch (e) {}
+  }
 }
 
 // ---- serial byte stream -> frames + text lines ----
@@ -71,6 +101,7 @@ function feedBytes(bytes) {
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
   textBuf += s;
   extractTextLines();
+  if (frameWaiter) frameWaiter();        // wake a pending command exchange
 }
 
 // pull complete "APRS:<summary>" / "APRSRAW:<hex>" lines out of the mixed stream
@@ -97,6 +128,7 @@ function extractTextLines() {
 
 function onRawLine(hex) {
   stats.heard++;
+  stats.last_heard_unix = Math.floor(Date.now() / 1000);
   const f = K5P.decodeRaw(hex);
   if (f) {
     stats.decoded++;
@@ -110,7 +142,7 @@ function onRawLine(hex) {
 
 // ---- iGate: APRS-IS session + gating ----
 const IG_VERSION = "0.1";
-const gate = { want: false, up: false, verified: false, retries: 0, timer: null, lastSent: 0 };
+const gate = { want: false, up: false, verified: false, retries: 0, timer: null, dueAt: 0, lastSent: 0 };
 const dedup = new Map();   // "SRC|info" -> last-heard ms
 
 function igCall() { return $("igCall").value.trim().toUpperCase(); }
@@ -137,7 +169,7 @@ async function startGating() {
 }
 async function stopGating() {
   gate.want = false;
-  clearTimeout(gate.timer);
+  gate.dueAt = 0;
   await inv("tcp_disconnect");
   gate.up = false;
   gate.verified = false;
@@ -169,8 +201,7 @@ function scheduleReconnect() {
   if (!gate.want) return;
   const secs = Math.min(60, 5 * Math.pow(2, gate.retries++));
   isStatus("reconnecting in " + secs + " s…", "err");
-  clearTimeout(gate.timer);
-  gate.timer = setTimeout(connectIS, secs * 1000);
+  gate.dueAt = Date.now() + secs * 1000;   // fired from the Rust tick
 }
 
 function gatePacket(f) {
@@ -196,15 +227,25 @@ function gatePacket(f) {
   }).catch((e) => addLog("err", "gate failed: " + e));
 }
 
-// server keepalives arrive as "#" comment lines; we also make sure the
-// connection is never silent for 15 min from our side
-setInterval(() => {
-  if (gate.up && Date.now() - gate.lastSent > 15 * 60 * 1000) {
+// APRS-IS liveness. Measured against euro.aprs2.net: the server emits a "#"
+// comment every 20.0-20.3 s, so 60 s of silence means a half-open socket —
+// which a keepalive write alone would never notice, because a dead TCP
+// connection accepts writes happily for a long time. Called from the tick.
+function checkIsLiveness() {
+  if (!gate.up) return;
+  if (gate.lastRx && Date.now() - gate.lastRx > 60000) {
+    addLog("err", "APRS-IS silent for 60 s — treating the link as dead");
+    gate.up = false; gate.verified = false;
+    inv("tcp_disconnect").catch(() => {});
+    scheduleReconnect();
+    return;
+  }
+  if (Date.now() - gate.lastSent > 15 * 60 * 1000) {
     inv("tcp_send", { line: "#uv-k5-igate keepalive" })
       .then(() => { gate.lastSent = Date.now(); })
       .catch(() => {});
   }
-}, 60 * 1000);
+}
 function onSummaryLine(line) {
   addLog("sum", "· " + line);   // the radio's own display line, secondary info
 }
@@ -212,14 +253,21 @@ function onSummaryLine(line) {
 // ---- framed-reply waiter + serialized command exchange ----
 // One command may be in flight at a time: rigctl requests, hello and the
 // beacon button all funnel through exchange() so replies can't interleave.
+// Event-driven rather than polled: a hidden window clamps setInterval to ~1 s,
+// which would starve a 1.5 s command timeout. feedBytes() pokes us instead.
+let frameWaiter = null;
 function waitFrame(ms) {
   return new Promise(resolve => {
-    const t0 = Date.now();
-    const iv = setInterval(() => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; frameWaiter = null; clearTimeout(to); resolve(v); } };
+    const tryExtract = () => {
       const f = K5P.extractFrame(rxBuf);
-      if (f) { rxBuf = f.rest; clearInterval(iv); resolve(f.payload); return; }
-      if (Date.now() - t0 > ms) { clearInterval(iv); resolve(null); }
-    }, 10);
+      if (f) { rxBuf = f.rest; finish(f.payload); return true; }
+      return false;
+    };
+    const to = setTimeout(() => finish(null), ms);
+    if (tryExtract()) return;            // it may already be buffered
+    frameWaiter = tryExtract;
   });
 }
 let cmdChain = Promise.resolve();
@@ -291,13 +339,15 @@ async function refreshPorts() {
 }
 
 // ---- connect / disconnect ----
-async function connect() {
+async function connect(isRetry) {
   const path = $("port").value;
   if (!path) { setStatus("select a serial port", "err"); return; }
+  if (!isRetry) { radioWant = true; radioTries = 0; }
   setStatus("connecting…");
   try {
     await inv("serial_open", { path });
   } catch (e) {
+    try { await inv("serial_close"); } catch (_e) {}   // never leave it half-open
     setStatus("open failed: " + e, "err");
     return;
   }
@@ -323,6 +373,8 @@ async function connect() {
     setStatus("connected: " + ver + " — but APRS listening is OFF at the radio", "err");
 }
 async function disconnect() {
+  radioWant = false;                 // an operator disconnect must not self-heal
+  clearTimeout(radioTimer);
   await inv("serial_close");
   onClosed("");
 }
@@ -331,6 +383,30 @@ function onClosed(reason) {
   $("btnConnect").textContent = "Connect";
   $("btnBeacon").disabled = true;
   setStatus(reason ? "disconnected: " + reason : "disconnected");
+  if (radioWant) {
+    addLog("err", "radio link lost" + (reason ? ": " + reason : ""));
+    scheduleRadioReconnect();
+  }
+}
+
+// The radio side had no recovery at all: unplug the USB adapter and the station
+// stayed dead for good, while APRS-IS quietly kept its session. Same backoff
+// shape as scheduleReconnect() below, and it re-scans ports each attempt
+// because a replugged adapter can come back under a different name.
+let radioWant = false, radioTries = 0, radioTimer = null, radioDueAt = 0;
+function scheduleRadioReconnect() {
+  if (!radioWant) return;
+  const secs = Math.min(60, 5 * Math.pow(2, radioTries++));
+  setStatus("radio gone — retrying in " + secs + " s", "err");
+  radioDueAt = Date.now() + secs * 1000;   // the Rust tick fires it
+}
+async function radioRetry() {
+  if (!radioWant || connected) return;
+  await refreshPorts();
+  if (!$("port").value) { scheduleRadioReconnect(); return; }
+  await connect(true);
+  if (!connected) scheduleRadioReconnect();
+  else { radioTries = 0; addLog("sum", "· radio link restored"); }
 }
 
 // ---- wire up ----
@@ -361,6 +437,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   await listen("tcp-line", (e) => {
     const line = e.payload;
+    gate.lastRx = Date.now();            // any traffic proves the socket is alive
     if (!line.startsWith("#")) return;   // no filter set, so anything else is noise
     if (/logresp/i.test(line)) {
       // "# logresp CALL verified, server ..." / "... unverified ..."
@@ -376,6 +453,41 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (gate.want) {
       isStatus("connection lost: " + e.payload, "err");
       scheduleReconnect();
+    }
+  });
+
+  // carry the previous life forward: counters, uptime and the tail of the log
+  try {
+    const s = await inv("load_stats");
+    if (s) Object.assign(stats, s);
+    if (!stats.first_start_unix) stats.first_start_unix = Math.floor(Date.now() / 1000);
+  } catch (e) {}
+  try {
+    const tail = await inv("log_tail", { n: 200 });
+    if (tail && tail.length) {
+      logArr = tail.map(t => ({ t: Date.now(), kind: "sum", text: t }));
+      renderLog();
+    }
+  } catch (e) {}
+  flushMark = Date.now();
+  window.addEventListener("beforeunload", () => { flushState(); });
+  await listen("app-quitting", () => { flushState(); });
+
+  // Everything time-driven hangs off the 5 s tick emitted by Rust, because a
+  // hidden webview's own timers get throttled and this app is expected to run
+  // for weeks with its window shut.
+  let lastFlush = Date.now();
+  await listen("tick", async () => {
+    renderStats();
+    checkIsLiveness();
+    if (Date.now() - lastFlush >= 30000) { lastFlush = Date.now(); await flushState(); }
+    if (radioWant && !connected && radioDueAt && Date.now() >= radioDueAt) {
+      radioDueAt = 0;
+      await radioRetry();
+    }
+    if (gate.want && !gate.up && gate.dueAt && Date.now() >= gate.dueAt) {
+      gate.dueAt = 0;
+      await connectIS();
     }
   });
 
