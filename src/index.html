@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UV-K5 iGate</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>UV-K5 iGate</h1>
+    </div>
+    <div class="conn">
+      <select id="port"></select>
+      <button id="btnRefresh" class="ghost" title="rescan serial ports">⟳</button>
+      <button id="btnConnect">Connect</button>
+    </div>
+  </header>
+
+  <div id="status" class="status">disconnected</div>
+
+  <main>
+    <section class="card igate">
+      <h2>iGate <span class="badge">RX-only</span></h2>
+      <label>Callsign-SSID
+        <input id="igCall" placeholder="N0CALL-10" maxlength="9" autocapitalize="characters" />
+      </label>
+      <label>APRS-IS passcode <span class="hint">(computed)</span>
+        <input id="igPass" readonly tabindex="-1" />
+      </label>
+      <label>APRS-IS server
+        <select id="igServer">
+          <option value="euro.aprs2.net:14580">euro.aprs2.net:14580</option>
+          <option value="rotate.aprs2.net:14580">rotate.aprs2.net:14580</option>
+          <option value="noam.aprs2.net:14580">noam.aprs2.net:14580</option>
+          <option value="asia.aprs2.net:14580">asia.aprs2.net:14580</option>
+        </select>
+      </label>
+      <button id="igToggle" class="big" disabled
+              title="coming in step 2 — APRS-IS session + gating rules">Start gating (soon)</button>
+      <div class="counters">
+        <div><b id="stHeard">0</b><span>heard</span></div>
+        <div><b id="stDecoded">0</b><span>decoded</span></div>
+        <div><b id="stGated">0</b><span>gated</span></div>
+        <div><b id="stDuped">0</b><span>duped</span></div>
+      </div>
+    </section>
+
+    <section class="card monitor">
+      <h2>Monitor
+        <span class="spacer"></span>
+        <button id="btnBeacon" class="ghost" disabled title="transmit the stored position now">Beacon</button>
+        <button id="btnClear" class="ghost">Clear</button>
+      </h2>
+      <div id="monLog" class="log"></div>
+    </section>
+  </main>
+
+  <footer>
+    Radio: UV-K5 with TA1JS APRS firmware, menu <b>APRS = ON</b>, tuned to 144.800 MHz.
+  </footer>
+
+  <script src="k5proto.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
