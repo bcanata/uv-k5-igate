@@ -150,10 +150,26 @@ fn startup_config(app: AppHandle) -> Config {
     c
 }
 
+// Merges rather than replaces. The UI owns only some of these keys, and a
+// partial write used to reset every key it did not mention: saving the
+// callsign silently switched autostart off and reset the whole KISS block,
+// because serde filled the absent fields from Default.
 #[tauri::command]
-fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
+fn save_config(app: AppHandle, cfg: serde_json::Value) -> Result<(), String> {
     let path = config_path(&app).ok_or("no config dir")?;
-    atomic_write(&path, serde_json::to_vec_pretty(&cfg).map_err(|e| e.to_string())?.as_slice())
+    let mut base = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !base.is_object() {
+        base = serde_json::json!({});
+    }
+    if let (Some(b), Some(c)) = (base.as_object_mut(), cfg.as_object()) {
+        for (k, v) in c {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    atomic_write(&path, serde_json::to_vec_pretty(&base).map_err(|e| e.to_string())?.as_slice())
 }
 
 #[tauri::command]
@@ -668,7 +684,11 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_i, &sep, &quit_i])?;
 
             TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                // A dedicated silhouette, not the app logo: the logo carries
+                // lettering that turns to mush at menu-bar size. Black+alpha as
+                // a template image, so macOS draws it white on a dark menu bar
+                // and black on a light one without us shipping two files.
+                .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
                 .tooltip("UV-K5 iGate")
                 .menu(&menu)

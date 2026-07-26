@@ -105,10 +105,15 @@ const KISS = (() => {
     }
     try {
       const p = await exchange(K5P.frameCommand(0x0708, new Uint8Array(frame)), 2500);
-      const ok = p && (p[0] | (p[1] << 8)) === 0x0709 && p[4] === 1;
-      addLog(ok ? "gate" : "err", ok
-        ? "▲ KISS TX " + frame.length + " B"
-        : "KISS TX refused by the radio (busy, no callsign, or too long)");
+      // No reply at all means the firmware predates the raw-TX command, which
+      // is a completely different problem from the radio declining the frame.
+      if (!p || (p[0] | (p[1] << 8)) !== 0x0709) {
+        addLog("err", "KISS TX: this firmware has no raw-TX command — reflash the radio");
+      } else if (p[4] === 1) {
+        addLog("gate", "▲ KISS TX " + frame.length + " B");
+      } else {
+        addLog("err", "KISS TX refused: radio busy, no callsign set, or over " + MAX_TX + " B");
+      }
     } catch (e) { addLog("err", "KISS TX failed: " + e); }
   }
 

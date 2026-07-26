@@ -28,14 +28,17 @@ function saveSettings() {
   const cfg = {
     call: $("igCall").value.trim().toUpperCase(),
     server: $("igServer").value,
-    // only remember a port we actually talked to a radio on, or autostart would
-    // faithfully reconnect to whatever happened to be first in the list
-    port: connected ? ($("port").value || "") : (loadSettings().port || ""),
+    // Only ever remember a port we actually talked to a radio on. When we are
+    // not connected the key is omitted entirely, so the merge in save_config
+    // keeps whatever was there instead of us storing, say, a Bluetooth port
+    // that merely happened to be in the list.
     comment: $("igComment").value,
     beacon_mins: parseInt($("igBeaconMins").value, 10) || 0,
     lat: beaconPos ? beaconPos.lat : 0,
-    lon: beaconPos ? beaconPos.lon : 0
+    lon: beaconPos ? beaconPos.lon : 0,
+    pos_src: $("igPosSrc").value
   };
+  if (connected && $("port").value) cfg.port = $("port").value;
   localStorage.setItem(SET_KEY, JSON.stringify(cfg));
   inv("save_config", { cfg }).catch(() => {});   // survives a WebView profile reset
 }
@@ -344,9 +347,36 @@ async function readRadioPosition() {
   return { lat, lon };
 }
 function showPos() {
+  const manual = $("igPosSrc").value === "manual";
+  $("igPosManual").style.display = manual ? "" : "none";
   $("igPos").textContent = beaconPos
-    ? K5P.fmtCoord(beaconPos.lat, true) + " " + K5P.fmtCoord(beaconPos.lon, false)
-    : "no position — set Loc on the radio, or the gate will not beacon";
+    ? "beaconing " + K5P.fmtCoord(beaconPos.lat, true) + " " + K5P.fmtCoord(beaconPos.lon, false)
+    : (manual ? "enter a latitude and longitude, or the gate will not beacon"
+              : "no position yet — set Loc on the radio, then reconnect");
+}
+
+// Manual entry is in decimal degrees because that is what people copy out of a
+// map; everything downstream works in the micro-degrees the radio stores.
+function readManualPos() {
+  const la = parseFloat($("igLat").value), lo = parseFloat($("igLon").value);
+  if (!isFinite(la) || !isFinite(lo) || Math.abs(la) > 90 || Math.abs(lo) > 180) return null;
+  return { lat: Math.round(la * 1e6), lon: Math.round(lo * 1e6) };
+}
+
+// Re-resolve where we claim to be. Choosing "from the radio" clears any manual
+// override, which previously had no way back: a stored lat/lon silently masked
+// the radio's own Loc for good.
+async function refreshPos() {
+  if ($("igPosSrc").value === "manual") {
+    beaconPos = readManualPos();
+  } else {
+    beaconPos = null;
+    if (connected) {
+      try { beaconPos = await readRadioPosition(); } catch (e) {}
+    }
+  }
+  showPos();
+  saveSettings();
 }
 async function setAprsOn(on) {
   const p = await exchange(K5P.frameCommand(0x0706, new Uint8Array([on ? 1 : 0])), 1500);
@@ -403,6 +433,11 @@ async function connect(isRetry) {
   } catch (e) {
     try { await inv("serial_close"); } catch (_e) {}   // never leave it half-open
     setStatus("open failed: " + e, "err");
+    // The port may simply not exist yet — an adapter that came back on another
+    // USB socket gets a different name, and at boot it may not be enumerated
+    // at all. Retrying re-scans, so this must schedule just like a failed
+    // handshake does.
+    if (radioWant) scheduleRadioReconnect();
     return;
   }
   // Retry: while the radio is transmitting (an auto-beacon takes a second or
@@ -429,11 +464,12 @@ async function connect(isRetry) {
   $("btnBeacon").disabled = false;
   if (!await ensureAprsListening())
     setStatus("connected: " + ver + " — but APRS listening is OFF at the radio", "err");
-  if (!beaconPos) {                     // config override wins; else ask the radio
+  if ($("igPosSrc").value !== "manual") {
     try { beaconPos = await readRadioPosition(); } catch (e) {}
-    showPos();
+    showPos(); saveSettings();
     if (beaconPos) addLog("sum", "· gate position from the radio: " +
       K5P.fmtCoord(beaconPos.lat, true) + " " + K5P.fmtCoord(beaconPos.lon, false));
+    else addLog("err", "the radio has no position set (menu Loc) — not beaconing");
   }
 }
 async function disconnect() {
@@ -492,6 +528,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     } catch (e) { addLog("err", "beacon failed: " + e); }
   });
   $("igCall").addEventListener("input", () => { updatePasscode(); saveSettings(); });
+  $("igPosSrc").addEventListener("change", refreshPos);
+  $("igLat").addEventListener("change", refreshPos);
+  $("igLon").addEventListener("change", refreshPos);
   $("igServer").addEventListener("change", saveSettings);
 
   $("igToggle").addEventListener("click", () => (gate.want ? stopGating() : startGating()));
@@ -572,7 +611,14 @@ async function autoStart() {
   if (cfg.call) { $("igCall").value = cfg.call; updatePasscode(); }
   if (cfg.comment) $("igComment").value = cfg.comment;
   if (typeof cfg.beacon_mins === "number" && cfg.beacon_mins >= 0) $("igBeaconMins").value = cfg.beacon_mins;
-  if (cfg.lat || cfg.lon) { beaconPos = { lat: cfg.lat, lon: cfg.lon }; }   // override
+  if (cfg.pos_src === "manual") {
+    $("igPosSrc").value = "manual";
+    if (cfg.lat || cfg.lon) {
+      $("igLat").value = (cfg.lat / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+      $("igLon").value = (cfg.lon / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+      beaconPos = { lat: cfg.lat, lon: cfg.lon };
+    }
+  }
   showPos();
   if (cfg.server) {
     if (![...$("igServer").options].some(o => o.value === cfg.server))

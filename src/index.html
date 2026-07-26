@@ -39,12 +39,26 @@
           <option value="asia.aprs2.net:14580">asia.aprs2.net:14580</option>
         </select>
       </label>
-      <label>Beacon my position every
-        <input id="igBeaconMins" value="30" inputmode="numeric" title="minutes; 0 disables" />
+      <label>Position beacon interval <span class="hint">minutes · 0 = off</span>
+        <input id="igBeaconMins" value="30" inputmode="numeric" />
       </label>
       <label>Beacon comment
         <input id="igComment" value="UV-K5 iGate" maxlength="43" />
       </label>
+      <label>Beacon position
+        <select id="igPosSrc">
+          <option value="radio">From the radio's Loc setting</option>
+          <option value="manual">Enter manually</option>
+        </select>
+      </label>
+      <div id="igPosManual" style="display:none">
+        <label>Latitude <span class="hint">decimal, S negative</span>
+          <input id="igLat" inputmode="decimal" placeholder="40.9934" />
+        </label>
+        <label>Longitude <span class="hint">decimal, W negative</span>
+          <input id="igLon" inputmode="decimal" placeholder="27.5997" />
+        </label>
+      </div>
       <div id="igPos" class="isline"></div>
       <button id="igToggle" class="big">Start gating</button>
       <div id="isStatus" class="isline">APRS-IS: idle</div>
