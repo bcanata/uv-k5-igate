@@ -89,6 +89,13 @@
       </label>
       <label class="check"><input type="checkbox" id="kissBind" /> Allow other machines (LAN)</label>
       <label class="check"><input type="checkbox" id="kissTx" /> Let clients transmit</label>
+      <label>May transmit as
+        <input id="kissAllow" placeholder="* (any callsign)" spellcheck="false" />
+      </label>
+      <div class="hint2">Callsigns a client is allowed to transmit as, e.g.
+        <code>TA1JS, TB1AAW-7</code>. A bare callsign allows every SSID of it.
+        <code>*</code> or empty allows any — anything that can reach the port can
+        then key your transmitter.</div>
       <button id="kissToggle" class="big">Start server</button>
       <div id="kissStatus" class="isline">KISS: off</div>
       <div class="hint2">Xastir / YAAC / APRSIS32 / APRSSwift: point them at<br /><code>127.0.0.1:8001</code> as a KISS TNC</div>

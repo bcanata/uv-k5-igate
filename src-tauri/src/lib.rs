@@ -67,6 +67,7 @@ impl Default for Config {
             kiss_lan: false,
             kiss_tx: false,
             kiss_autostart: false,
+            kiss_allow: String::new(),
         }
     }
 }
@@ -88,6 +89,10 @@ struct Config {
     kiss_lan: bool,
     kiss_tx: bool,
     kiss_autostart: bool,
+    // Source callsigns a KISS client may transmit as, comma/space separated.
+    // Empty or "*" allows any, which is what the TNC did before this existed.
+    // A bare callsign matches every SSID of it; "TA1JS-7" matches only that one.
+    kiss_allow: String,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -146,6 +151,9 @@ fn startup_config(app: AppHandle) -> Config {
     if let Ok(v) = std::env::var("UVK5_IGATE_SERVER") { if !v.is_empty() { c.server = v; } }
     if let Ok(v) = std::env::var("UVK5_IGATE_PORT")   { if !v.is_empty() { c.port = v; } }
     if let Ok(v) = std::env::var("UVK5_IGATE_AUTOSTART") { c.autostart = v == "1"; }
+    // Guarded like the rest: an empty value means "not set", so a stray export
+    // cannot silently widen the policy back to allow-any. Use "*" to mean any.
+    if let Ok(v) = std::env::var("UVK5_IGATE_KISS_ALLOW") { if !v.is_empty() { c.kiss_allow = v; } }
     if std::env::args().any(|a| a == "--autostart") { c.autostart = true; c.start_hidden = true; }
     c
 }

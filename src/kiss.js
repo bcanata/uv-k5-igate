@@ -24,19 +24,71 @@ const KISS = (() => {
     el.textContent = "KISS: " + text;
     el.className = "isline" + (cls ? " " + cls : "");
   }
+
+  // ---- who may transmit -------------------------------------------------
+  // The TNC hands frames straight to the transmitter, so whatever can reach
+  // the port is operating under our licence. The allow list is checked against
+  // the AX.25 *source* address of each frame, which is the callsign that will
+  // actually go on the air.
+  //
+  // "TA1JS"   -> any SSID of TA1JS        (TA1JS, TA1JS-7, TA1JS-10 …)
+  // "TA1JS-7" -> only that SSID
+  // "*" or "" -> anything, which is what this did before the list existed
+  function allowList() {
+    return ($("kissAllow").value || "")
+      .toUpperCase().split(/[\s,;]+/).filter(Boolean);
+  }
+  function allowsAny(list) {
+    return list.length === 0 || list.includes("*");
+  }
+
+  // Source callsign of an AX.25 frame: second address field, characters held in
+  // the top 7 bits, SSID in bits 4..1 of the seventh byte. Returns null if the
+  // frame is too short or the field is not a plausible callsign — callers must
+  // treat null as "not allowed" whenever a list is set.
+  function sourceCall(frame) {
+    if (frame.length < 14) return null;
+    let call = "";
+    for (let i = 7; i < 13; i++) {
+      const c = String.fromCharCode(frame[i] >> 1);
+      if (c !== " ") call += c;
+    }
+    if (!/^[A-Z0-9]{1,6}$/.test(call)) return null;
+    const ssid = (frame[13] >> 1) & 0x0F;
+    return ssid ? call + "-" + ssid : call;
+  }
+
+  function txAllowed(frame) {
+    const list = allowList();
+    if (allowsAny(list)) return { ok: true, call: sourceCall(frame) || "?" };
+    const call = sourceCall(frame);
+    if (!call) return { ok: false, call: "unreadable" };
+    const base = call.split("-")[0];
+    // a bare entry covers every SSID; an entry with one must match exactly
+    const ok = list.some((e) => (e.includes("-") ? e === call : e === base));
+    return { ok, call };
+  }
   function refresh() {
     $("kissToggle").textContent = running ? "Stop server" : "Start server";
     $("kissToggle").classList.toggle("on", running);
+    // Spell out the transmit policy: "any callsign" is a real exposure and the
+    // operator should be able to see it without opening a config file.
+    let policy = "";
+    if ($("kissTx").checked) {
+      const list = allowList();
+      policy = " — TX as " + (allowsAny(list) ? "ANY callsign" : list.join(", "));
+    }
     line(running
       ? "listening on " + ($("kissBind").checked ? "0.0.0.0" : "127.0.0.1") + ":" +
-        $("kissPort").value + " — " + clients + " client" + (clients === 1 ? "" : "s")
+        $("kissPort").value + " — " + clients + " client" + (clients === 1 ? "" : "s") + policy
       : "off");
   }
   function save() {
     localStorage.setItem(KISS_KEY, JSON.stringify({
       port: parseInt($("kissPort").value, 10) || 8001,
       lan: $("kissBind").checked,
-      tx: $("kissTx").checked
+      tx: $("kissTx").checked,
+      allow: $("kissAllow").value || ""
     }));
   }
   function load() {
@@ -45,6 +97,7 @@ const KISS = (() => {
       if (s.port) $("kissPort").value = s.port;
       $("kissBind").checked = !!s.lan;
       $("kissTx").checked = !!s.tx;
+      if (typeof s.allow === "string") $("kissAllow").value = s.allow;
     } catch (e) {}
   }
 
@@ -103,6 +156,11 @@ const KISS = (() => {
       addLog("err", "KISS TX: frame is " + frame.length + " B, the radio caps at " + MAX_TX);
       return;
     }
+    const who = txAllowed(frame);
+    if (!who.ok) {
+      addLog("drop", "✗ KISS TX blocked: " + who.call + " is not in the allow list");
+      return;
+    }
     try {
       const p = await exchange(K5P.frameCommand(0x0708, new Uint8Array(frame)), 2500);
       // No reply at all means the firmware predates the raw-TX command, which
@@ -124,6 +182,7 @@ const KISS = (() => {
     if (cfg.kiss_port) $("kissPort").value = cfg.kiss_port;
     if (typeof cfg.kiss_lan === "boolean") $("kissBind").checked = cfg.kiss_lan;
     if (typeof cfg.kiss_tx === "boolean") $("kissTx").checked = cfg.kiss_tx;
+    if (typeof cfg.kiss_allow === "string") $("kissAllow").value = cfg.kiss_allow;
     refresh();
     if (cfg.kiss_autostart && !running) await start();
   }
@@ -133,7 +192,8 @@ const KISS = (() => {
     $("kissToggle").addEventListener("click", () => (running ? stop() : start()));
     $("kissPort").addEventListener("change", save);
     $("kissBind").addEventListener("change", save);
-    $("kissTx").addEventListener("change", save);
+    $("kissTx").addEventListener("change", () => { save(); refresh(); });
+    $("kissAllow").addEventListener("change", () => { save(); refresh(); });
 
     await listen("kiss-frame", (e) => onClientFrame(e.payload.data));
     await listen("kiss-count", (e) => { clients = e.payload; refresh(); });
