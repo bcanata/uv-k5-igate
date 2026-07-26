@@ -1,6 +1,6 @@
 [package]
 name = "uv-k5-igate"
-version = "0.1.0"
+version = "0.1.1"
 description = "UV-K5 APRS iGate — desktop companion for the TA1JS APRS firmware"
 authors = ["Buğra Canata TA1JS"]
 license = "Apache-2.0"
