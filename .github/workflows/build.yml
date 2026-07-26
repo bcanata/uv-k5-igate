@@ -9,6 +9,12 @@ on:
 
 jobs:
   build:
+    # creating the release and uploading the installers needs a writable token;
+    # without this the tag build gets "Resource not accessible by integration"
+    # from the create-a-release call, after a perfectly good build
+    permissions:
+      contents: write
+
     strategy:
       fail-fast: false
       matrix:
