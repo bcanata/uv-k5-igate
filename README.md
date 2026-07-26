@@ -31,8 +31,10 @@ about a second. PTT is behind an explicit checkbox.
 
 **KISS TNC.** A KISS-over-TCP server (default `127.0.0.1:8001`) so Xastir,
 YAAC, APRSIS32 or [APRSSwift](https://github.com/bcanata/APRSSwift) can use the
-radio as their modem. Receive works out of the box; letting clients transmit is
-opt-in.
+radio as their modem. Receive works out of the box. Transmit is opt-in — tick
+**Let clients transmit** and any frame a client sends, up to 150 bytes, is
+keyed up on the radio under your callsign, including from a client that is
+doing its own internet-to-RF gating.
 
 **Unattended.** Reconnects to the radio when the USB adapter disappears,
 reconnects to APRS-IS with backoff, keeps running with its window closed
@@ -90,7 +92,18 @@ profile, so for a permanent station put the settings in `config.json` and set
 - **Frames over 78 bytes do not decode**, a limit in the firmware's receive
   buffer, so long weather and telemetry packets are neither gated nor passed
   to KISS clients.
-- **Receive-only gating.** Nothing is gated from the internet back to RF.
+- **The gate is one-way, the radio is not.** The iGate itself only ever
+  forwards RF → APRS-IS; it does not put APRS-IS traffic back on the air, so a
+  message addressed to a station it hears is not relayed. That is exactly what
+  the `qAO` construct on every gated packet declares, and it stays true
+  whatever else the app is doing. Transmitting is a separate path: with KISS
+  **Let clients transmit** on, a client can send anything through the radio —
+  and a client that is itself connected to APRS-IS will happily gate the
+  internet to RF that way. It is off by default, and what goes out is your
+  responsibility, on your callsign.
+- **KISS transmit has not been confirmed on the air yet.** The server, the
+  framing and the receive direction are tested; a frame sent by a client
+  actually being heard by another station has not been verified end to end.
 
 ## Development
 

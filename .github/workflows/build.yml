@@ -48,7 +48,10 @@ jobs:
           # only a tag publishes; ordinary pushes just prove it still builds
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseDraft: false
+          # a draft, so the release is never public with only one platform's
+          # installer attached — the two matrix jobs finish minutes apart.
+          # Publish it once both have uploaded.
+          releaseDraft: true
           prerelease: false
 
       - name: Keep the installer even when we are not releasing
