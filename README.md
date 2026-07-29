@@ -130,3 +130,14 @@ image mounted: `hdiutil detach /Volumes/dmg.*` and delete
 ## Licence
 
 Apache-2.0.
+
+## Sponsorlar / Sponsors
+
+Bu projeyi [GitHub Sponsors](https://github.com/sponsors/bcanata) üzerinden destekleyebilirsiniz.
+Destekçilerin adı (ve kurumsal destekçilerin logosu) aşağıda yer alır.
+
+You can support this project via [GitHub Sponsors](https://github.com/sponsors/bcanata).
+Sponsors are listed below, with logos for organisation-tier sponsors.
+
+<!-- sponsors -->
+<!-- /sponsors -->
